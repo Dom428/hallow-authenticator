@@ -1,0 +1,8 @@
+{
+  "name": "hallow-authenticator",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hallow Authenticator - 2FA codes on your phone, delivered by Hallow Remote",
+  "scripts": { "test": "node test/unit.mjs" }
+}
