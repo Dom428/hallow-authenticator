@@ -8,6 +8,10 @@ Your 2FA codes on your phone - a replacement for Microsoft Authenticator in the 
 - **Import:** Google Authenticator's export QR codes (several in a row), `otpauth://` lists, Aegis (plain or encrypted), 2FAS (plain or encrypted), and **Hallow Keys** 2.11 (copy or move its 2FA codes, end-to-end encrypted).
 - **Big codes, tap to copy**, countdown ring, next code, search, pin to the top, a letter tile per service (no logos fetched from the internet), light / dark following the phone, the Hallow accent.
 - **Encrypted backups** with a separate backup password: save the file on the phone, or send it to the PC, where Hallow Remote stores it without being able to open it (`%APPDATA%\HallowAuthenticator\backups`, copy it to your NAS). Restore on a new phone from the file or the PC.
+- **Don't lose access (1.1):** the app asks the browser to protect its storage from automatic clearing (at setup and on every start until it says yes; Settings shows "Protected from automatic clearing: yes / no"); a banner until your first backup, "N accounts not in your latest backup" after you add or change some, and a gentle reminder when the last backup is over 14 days old.
+- **Automatic backup to your PC (1.1):** switched on after your first backup (you can turn it off). After changes, at most once a day, when the PC is reachable, the already-encrypted accounts go to Hallow Remote 1.21+, locked with the password of your latest backup (or your Authenticator passcode, if you choose). Remote keeps the last 10 in `%APPDATA%\HallowAuthenticator\autobackups` and can't open them.
+- **Never locked in (1.1):** export an encrypted **Aegis** file (imported by Aegis, 2FAS, Ente Auth, Proton Pass...), **Google Authenticator-style transfer QR codes**, or - with a strong warning and your passcode - a plain list of `otpauth://` links; and **show one account's QR code** to move it to another app.
+- **Hide codes until tapped (1.1)** for screens others can see, and **backup codes / notes per account** (encrypted with everything else) so each site's own recovery codes sit next to its account.
 - **Nothing secret goes to the PC** unless you turn on the PC mirror (off by default; a sealed read-only copy of the accounts you pick, shown by Hallow Keys while it's unlocked - convenience over strength).
 
 ## Install on your Android phone (Chrome)
@@ -19,6 +23,16 @@ Your 2FA codes on your phone - a replacement for Microsoft Authenticator in the 
 5. Add accounts with **+**. Then **Settings > Save a backup file** or **Back up to my PC**, and keep the backup password somewhere safe.
 
 iPhone: open the link in Safari, **Share > Add to Home Screen first**, and set the app up from the Home Screen icon (Safari and the Home Screen app keep separate data on iOS). Fingerprint / face unlock needs iOS 18+.
+
+## Don't lose access
+
+Your codes live only on the phone, so a lost phone or cleared browser data must never be the end:
+
+1. **Make a backup** as soon as you've added your accounts (Settings > Save a backup file, or Back up to my PC). Write the backup password down somewhere safe - nobody can open the backup without it.
+2. Leave **Automatic backup to my PC** on (it switches on after your first backup): from then on, changes reach your PC by themselves, at most once a day.
+3. **Install the app** (Add to Home screen) and open it now and then: that is what makes Chrome promise to keep its data ("Protected from automatic clearing: yes" in Settings). Even then, Chrome's **Clear browsing data** (cookies and site data) for this site, clearing Chrome's storage, uninstalling the app or resetting the phone wipes it - that's what the backups are for.
+4. When you set up 2FA on a site, put its **backup / recovery codes** in the account's notes (open the account with ... > Add backup codes / notes).
+5. Want to leave? **Settings > Move to another app**: an Aegis file, transfer QR codes or a plain list.
 
 ## Moving from Microsoft Authenticator
 
@@ -47,6 +61,8 @@ Everything on the phone: codes, copy, search, editing, scanning, saving a backup
 - A short passcode only slows down someone who has copied the phone's browser data (5 tries are free, then waits of 30 s growing to 15 min in the app; offline guessing is limited only by PBKDF2) - your phone's own screen lock is the first line. Use a passphrase.
 - The page has a strict Content-Security-Policy (no inline script or style, only this PC), never puts anything from a QR code or file into the page as HTML, and calls only its own PC.
 - Backups: their own password, the same PBKDF2 + AES-GCM; Hallow Remote checks only the outer shape and stores the bytes as they came.
+- Automatic backups (1.1): after a backup, the 256-bit key derived from its password (PBKDF2, 600,000 rounds, with that backup's salt) is kept inside the encrypted vault, so later automatic backups use the same password without asking - the file format is the normal backup, so Restore opens it with that password. Or, if you pick the passcode: the phone's own passcode wrap of its data key plus the accounts sealed with that key (`hallow-authenticator-vault`) - it opens only with the passcode the phone had when it was made.
+- Exports (1.1): the Aegis file uses Aegis' own format (scrypt N 2^15 / r 8 / p 1 password slot wrapping a random master key, AES-256-GCM); the transfer QR codes and the plain list contain every secret readable, so the app asks for your passcode first and warns. The QR codes are drawn by the app (an SVG, no network).
 - Hallow Keys transfer: Keys makes a one-time 160-bit code it shows on the PC screen; the codes are sealed with a key derived from it; Remote gets only a lookup id and the sealed blob (memory only, given out once, 10 minutes). The phone proves receipt with an HMAC only the code's holder can make; only then does a move take the keys out of Hallow Keys.
 - PC mirror: sealed with a 256-bit key Hallow Keys shows once as a QR code and keeps inside its encrypted vault; Remote stores the sealed file; Keys opens it only while unlocked. It puts codes back on the PC next to the passwords, so it's weaker 2FA - leave important accounts out.
 
@@ -60,6 +76,6 @@ Everything on the phone: codes, copy, search, editing, scanning, saving a backup
 
 ## Build and test
 
-There is nothing to build: `app/` is the app. Hallow Remote embeds a copy (`tools/sync-to-remote.ps1` copies `app/` into Remote's `src/web/auth`; the version is in `app/sw.js`). `tools/make-icons.ps1` draws the icons. Tests (Node 18+, no packages): `node test/unit.mjs` - RFC 4226 / 6238 vectors, Steam Guard vectors, scrypt RFC 7914 vectors, Google export protobuf, Aegis / 2FAS fixtures, the vault (round trip, wrong passcode, tamper, PRF wrap), backups, auto-lock, the Keys transfer and mirror formats, and the QR reader on generated images (all EC levels, masks, versions 1-40, rotation, perspective, noise, blur, inverted).
+There is nothing to build: `app/` is the app. Hallow Remote embeds a copy (`tools/sync-to-remote.ps1` copies `app/` into Remote's `src/web/auth`; the version is in `app/sw.js`). `tools/make-icons.ps1` draws the icons. Tests (Node 18+, no packages): `node test/unit.mjs` - 1.1: the QR encoder read back by the app's reader, the Aegis export opened independently with node's scrypt + AES-GCM, the transfer codes decoded by an independent protobuf reader, both automatic backup kinds, the reminder and once-a-day rules; RFC 4226 / 6238 vectors, Steam Guard vectors, scrypt RFC 7914 vectors, Google export protobuf, Aegis / 2FAS fixtures, the vault (round trip, wrong passcode, tamper, PRF wrap), backups, auto-lock, the Keys transfer and mirror formats, and the QR reader on generated images (all EC levels, masks, versions 1-40, rotation, perspective, noise, blur, inverted).
 
 Made-up test data only - never real accounts or secrets.

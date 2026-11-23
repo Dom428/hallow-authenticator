@@ -247,5 +247,105 @@ check('2FAS plain: 2 entries incl. Steam', tp.entries.length === 2 && tp.entries
     check('QR images from Hallow Remote\'s C# encoder: ' + good + ' of ' + n, n > 0 && good === n);
   }
 }
+// ======== 1.1 ========
+{
+  const X = await import('../app/exporters.js'), QE = await import('../app/qrcode.js');
+  const nodeCrypto = await import('crypto');
+  const E = (o) => { const e = Object.assign({ type: 'totp', algo: 'SHA1', digits: 6, period: 30, counter: 0 }, o); otp.normalize(e); e.id = e.id || Math.random().toString(36).slice(2); return e; };
+  const acc = [E({ issuer: 'MadeUpMail', label: 'sam@example.org', secret: 'JBSWY3DPEHPK3PXP', notes: 'made-up backup codes: 1111-2222 3333-4444' }), E({ issuer: 'Made Up Bank', label: 'sam', secret: 'GEZDGNBVGY3TQOJQ', algo: 'SHA256', digits: 8 }),
+    E({ issuer: 'SlowSite', label: 'x', secret: 'KRSXG5CTMVRXEZLU', period: 60 }), E({ type: 'hotp', issuer: 'CounterCo', label: 'c', secret: 'MFRGGZDFMZTWQ2LK', counter: 7 }), Object.assign({ id: 'st' }, steamE), E({ label: 'no issuer here', secret: 'ORSXG5AJBSWY3DP' })];
+
+  // ---- QR encoder (app/qrcode.js): every code it makes is read back by the app's reader through the tests' own renderer
+  let qrOk = 0, qrN = 0;
+  for (const ecl of ['L', 'M', 'Q', 'H']) for (const len of [1, 17, 60, 140, 300, 700]) {
+    const txt = 'otpauth://totp/Made%20Up:me?secret=JBSWY3DPEHPK3PXP&n=' + 'x'.repeat(len); const q = QE.encode(txt, ecl); qrN++;
+    const got = Q.decodeImage(render(q.grid, { px: 3 })); if (got === txt) qrOk++; else console.log('  qr ' + ecl + ' ' + len + ' v' + q.version + ' mask ' + q.mask + ' -> ' + JSON.stringify(got).slice(0, 60));
+  }
+  check('QR encoder: ' + qrOk + ' of ' + qrN + ' codes (EC L/M/Q/H, up to ~750 bytes) read back by the app\'s reader', qrOk === qrN);
+  const masks = new Set(); for (let i = 0; i < 30; i++) masks.add(QE.encode('mask test ' + i, 'M').mask); check('QR encoder picks masks by the penalty rules (several used: ' + [...masks].join(',') + ')', masks.size >= 3);
+  check('QR encoder: the SVG path has one square per dark module', (() => { const q = QE.encode('hello', 'M'); const dark = q.grid.flat().filter(Boolean).length; return (QE.qrPath(q.grid).match(/M/g) || []).length === dark; })());
+  const one = otp.toOtpauth(acc[1]); check('one account\'s QR (otpauth link) reads back and parses to the same account', (() => { const t = Q.decodeImage(render(QE.encode(one, 'M').grid, { px: 4 })); const r = otp.parseOtpauth(t); return !!r.entry && r.entry.secret === acc[1].secret && r.entry.digits === 8 && r.entry.algo === 'SHA256' && r.entry.issuer === 'Made Up Bank'; })());
+
+  // ---- plain otpauth list
+  const plain = X.otpauthList(acc), back = otp.parseOtpauthList(plain);
+  check('plain list: one link per account, all parse back (TOTP / HOTP / Steam / 60 s / SHA256 8 digits)', back.entries.length === acc.length && back.errors.length === 0 && back.entries.every((e, i) => e.secret === (acc[i].secretFormat === 'base64' ? otp.base32Encode(otp.b64ToBytes(acc[i].secret)) : acc[i].secret) && e.type === acc[i].type && e.digits === acc[i].digits), back);
+  check('plain list: notes are never in it', !plain.includes('1111-2222'));
+
+  // ---- Aegis export, opened independently (node:crypto scrypt + AES-256-GCM, written from Aegis' vault.md - not the app's code)
+  const aeg = await X.aegisExport(acc, 'made-up aegis pw', 1024), aj = JSON.parse(aeg);
+  check('Aegis file: version 1, one password slot (type 1, scrypt n/r/p, salt), db sealed', aj.version === 1 && aj.header.slots.length === 1 && aj.header.slots[0].type === 1 && aj.header.slots[0].n === 1024 && aj.header.slots[0].r === 8 && aj.header.slots[0].p === 1 && typeof aj.db === 'string' && !aeg.includes('JBSWY3DP') && !aeg.includes('MadeUpMail'));
+  const indep = (txt, pw) => {
+    const j = JSON.parse(txt), s = j.header.slots[0];
+    const k = nodeCrypto.scryptSync(Buffer.from(pw), Buffer.from(s.salt, 'hex'), 32, { N: s.n, r: s.r, p: s.p, maxmem: 256 * 1024 * 1024 });
+    const d1 = nodeCrypto.createDecipheriv('aes-256-gcm', k, Buffer.from(s.key_params.nonce, 'hex')); d1.setAuthTag(Buffer.from(s.key_params.tag, 'hex'));
+    const master = Buffer.concat([d1.update(Buffer.from(s.key, 'hex')), d1.final()]);
+    const d2 = nodeCrypto.createDecipheriv('aes-256-gcm', master, Buffer.from(j.header.params.nonce, 'hex')); d2.setAuthTag(Buffer.from(j.header.params.tag, 'hex'));
+    return JSON.parse(Buffer.concat([d2.update(Buffer.from(j.db, 'base64')), d2.final()]).toString('utf8'));
+  };
+  let db = null; try { db = indep(aeg, 'made-up aegis pw'); } catch (x) { db = { err: x.message }; }
+  check('Aegis file opens with node:crypto (independent): db version 3, all accounts', !!db && db.version === 3 && Array.isArray(db.entries) && db.entries.length === acc.length, db);
+  const de = (db && db.entries) || [];
+  check('Aegis entries: type, name, issuer, info (secret base32, algo, digits, period / counter), note, uuid', de.length === acc.length && de[1].info.algo === 'SHA256' && de[1].info.digits === 8 && de[2].info.period === 60 && de[3].type === 'hotp' && de[3].info.counter === 7 && de[4].type === 'steam' && de[4].info.secret === otp.base32Encode(ss) && de[0].note.includes('1111-2222') && /^[0-9a-f-]{36}$/.test(de[0].uuid) && de[0].name === 'sam@example.org' && de[0].issuer === 'MadeUpMail', de);
+  let wrongA = null; try { indep(aeg, 'not it'); } catch (x) { wrongA = x; } check('Aegis file: a wrong password doesn\'t open it', !!wrongA);
+  const reim = await I.parseAny(aeg, 'made-up aegis pw');
+  check('Aegis file re-imported by this app: same accounts and codes, notes kept', reim.entries.length === acc.length && (await otp.codeFor(reim.entries[4], 3000030)) === 'YRGQJ' && reim.entries[0].notes.includes('1111-2222') && (await otp.codeFor(reim.entries[1], 1234567890)) === (await otp.codeFor(acc[1], 1234567890)), reim.skipped);
+  const t0 = Date.now(), full = await X.aegisExport(acc.slice(0, 1), 'made-up aegis pw'); const ft = Date.now() - t0;
+  check('Aegis file at Aegis\' own strength (scrypt N 32768): made in ' + ft + ' ms and opens independently', JSON.parse(full).header.slots[0].n === 32768 && indep(full, 'made-up aegis pw').entries.length === 1);
+
+  // ---- Google Authenticator transfer codes: an independent protobuf reader, and this app's importer
+  const pbRead = b => { let p = 0; const out = []; const vi = () => { let r = 0, s = 0, x; do { x = b[p++]; r += (x & 127) * 2 ** s; s += 7; } while (x & 128); return r; }; while (p < b.length) { const k = vi(), f = Math.floor(k / 8), t = k & 7; if (t === 0) out.push({ f, v: vi() }); else if (t === 2) { const n = vi(); out.push({ f, b: b.slice(p, p + n) }); p += n; } else throw new Error('wire ' + t); } return out; };
+  const many = []; for (let i = 0; i < 19; i++) many.push(E({ issuer: 'Made Up ' + i, label: 'u' + i + '@example.org', secret: otp.base32Encode(new Uint8Array(10).fill(i + 1)) }));
+  const g = X.googleMigration(acc.concat(many), 8, 4242);
+  check('transfer codes: Steam and the 60 s one left out (named), 23 accounts in 3 codes of up to 8', g.count === 23 && g.uris.length === 3 && g.skipped.length === 2 && /SlowSite/.test(g.skipped.join()) && /Steam/.test(g.skipped.join()), g);
+  const pay = g.uris.map(u => pbRead(otp.b64ToBytes(decodeURIComponent(u.split('data=')[1]))));
+  check('transfer codes (independent reader): version 1, batch size 3, index 0/1/2, the same batch id', pay.every((p, i) => p.find(x => x.f === 2).v === 1 && p.find(x => x.f === 3).v === 3 && (p.find(x => x.f === 4) || { v: 0 }).v === i && p.find(x => x.f === 5).v === 4242));
+  const first = pbRead(pay[0].filter(x => x.f === 1)[0].b), bankP = pbRead(pay[0].filter(x => x.f === 1)[1].b), hotpP = pbRead(pay[0].filter(x => x.f === 1)[2].b);
+  check('transfer codes (independent reader): secret bytes, "issuer:account" name, issuer, SHA1 / 6 digits / TOTP', Buffer.from(first.find(x => x.f === 1).b).equals(Buffer.from(otp.base32Decode('JBSWY3DPEHPK3PXP'))) && new TextDecoder().decode(first.find(x => x.f === 2).b) === 'MadeUpMail:sam@example.org' && new TextDecoder().decode(first.find(x => x.f === 3).b) === 'MadeUpMail' && first.find(x => x.f === 4).v === 1 && first.find(x => x.f === 5).v === 1 && first.find(x => x.f === 6).v === 2);
+  check('transfer codes (independent reader): SHA256 + 8 digits, and HOTP with its counter', bankP.find(x => x.f === 4).v === 2 && bankP.find(x => x.f === 5).v === 2 && hotpP.find(x => x.f === 6).v === 1 && hotpP.find(x => x.f === 7).v === 7);
+  const gi = g.uris.map(u => I.parseGoogleMigration(u)), all = gi.flatMap(x => x.entries);
+  check('transfer codes read back by this app\'s importer (as from Google): 23 accounts, codes match', all.length === 23 && gi.every((x, i) => x.batch.index === i && x.batch.size === 3) && (await otp.codeFor(all[1], 59)) === (await otp.codeFor(acc[1], 59)) && all[2].type === 'hotp' && all[2].counter === 7, gi.map(x => x.skipped));
+  check('transfer codes fit a QR code each (and read back through the app\'s reader)', g.uris.every(u => Q.decodeImage(render(QE.encode(u, 'M').grid, { px: 3 })) === u));
+
+  // ---- backups 1.1: a kept backup-password key, a passcode-locked automatic backup
+  const bk = await V.backupKeyFrom('made-up backup pw 2', 100000);
+  const f1 = await V.makeBackupWithKey(acc, bk);
+  check('backup with the kept key: the normal backup format, opens with the password', JSON.parse(f1).format === V.BACKUP_FORMAT && (await V.readBackup(f1, 'made-up backup pw 2')).length === acc.length && !f1.includes('JBSWY3DP') && !f1.includes('1111-2222'));
+  const f1b = await V.makeBackupWithKey(acc, bk); check('two backups with the same key differ (fresh IV each time)', JSON.parse(f1).ct !== JSON.parse(f1b).ct && JSON.parse(f1).salt === JSON.parse(f1b).salt);
+  const st = V.memoryStorage(), v = new V.Vault(st, { iterations: 100000 }); await v.create('made-up passcode 9'); v.data.entries = acc.map(e => Object.assign({}, e)); await v.save();
+  check('checkPasscode: right yes, wrong no', (await v.checkPasscode('made-up passcode 9')) === true && (await v.checkPasscode('nope')) === false);
+  const f2 = await v.passcodeBackup(), j2 = JSON.parse(f2);
+  check('passcode-locked backup: format "hallow-authenticator-vault", nothing readable, the phone\'s passcode wrap', j2.format === 'hallow-authenticator-vault' && !f2.includes('JBSWY3DP') && !f2.includes('MadeUp') && !f2.includes('1111') && j2.wct === (await v.meta()).wrap.ct && V.backupKind(f2) === 'passcode' && V.backupKind(f1) === 'password');
+  const r2 = await V.readAnyBackup(f2, 'made-up passcode 9'); check('passcode-locked backup opens with the passcode: all accounts, notes kept', r2.length === acc.length && r2[0].notes.includes('1111-2222'));
+  let w2 = null; try { await V.readAnyBackup(f2, 'made-up passcode 1'); } catch (x) { w2 = x; } check('passcode-locked backup: a wrong passcode is refused', w2 instanceof V.WrongPasscode);
+  await v.changePasscode('made-up passcode 9', 'made-up passcode 10');
+  const r3 = await V.readAnyBackup(f2, 'made-up passcode 9'); check('an older passcode backup still opens with the passcode it was made with', r3.length === acc.length);
+  check('parseAny knows both backup kinds', (await I.parseAny(f2)).kind === 'backup' && (await I.parseAny(f1)).kind === 'backup');
+  const t2 = JSON.parse(f2); t2.ct = t2.ct.slice(0, 10) + (t2.ct[10] === 'A' ? 'B' : 'A') + t2.ct.slice(11); let tam2 = null; try { await V.readVaultBackup(JSON.stringify(t2), 'made-up passcode 9'); } catch (x) { tam2 = x; } check('a changed byte in a passcode backup is refused', !!tam2);
+
+  // ---- reminders: none yet, N not in the latest backup, older than 14 days; automatic backup due at most once a day after changes
+  const d = { entries: acc.slice(0, 3).map(e => Object.assign({}, e)) }, day = 86400000, T = Date.parse('2026-11-23T12:00:00Z');
+  let s1 = V.backupStatus(d, T); check('reminder: no backup yet', s1.never && s1.notIn === 3);
+  V.markBackedUp(d, 'pc', T); s1 = V.backupStatus(d, T); check('reminder: after a backup nothing is missing', !s1.never && s1.notIn === 0 && !s1.stale);
+  d.entries.push(Object.assign({}, acc[3])); d.entries[0].label = 'renamed'; s1 = V.backupStatus(d, T + 1000); check('reminder: an added and a changed account -> "2 not in your latest backup"', s1.notIn === 2, s1);
+  d.entries[1].notes = 'new made-up codes'; check('reminder: new backup codes / notes count as a change', V.backupStatus(d, T).notIn === 3);
+  d.entries.pop(); check('reminder: a deleted account isn\'t "missing"', V.backupStatus(d, T).notIn === 2);
+  V.markBackedUp(d, 'file', T); check('reminder: not stale at 14 days, stale at 15', !V.backupStatus(d, T + 14 * day).stale && V.backupStatus(d, T + 15 * day + 1000).stale && V.backupStatus(d, T + 15 * day + 1000).days === 15);
+  const on = { autoBackup: true }, off = { autoBackup: false }, undecided = { autoBackup: null };
+  check('auto backup: not due with nothing changed', !V.autoBackupDue(d, on, T + 1000));
+  d.entries[0].label = 'changed again'; check('auto backup: due after a change (never sent before)', V.autoBackupDue(d, on, T + 1000));
+  check('auto backup: never when off or not decided yet', !V.autoBackupDue(d, off, T + 1000) && !V.autoBackupDue(d, undecided, T + 1000));
+  d.auto = { last: new Date(T).toISOString() }; check('auto backup: at most once a day (23 h no, 24 h yes)', !V.autoBackupDue(d, on, T + 23 * 3600000) && V.autoBackupDue(d, on, T + 24 * 3600000));
+  check('auto backup: nothing to send with no accounts', !V.autoBackupDue({ entries: [] }, on, T));
+  check('default settings: codes shown, auto backup undecided, backup-password mode', V.defaultSettings().hideCodes === false && V.defaultSettings().autoBackup === null && V.defaultSettings().autoMode === 'backup');
+
+  // ---- notes stay out of the PC mirror
+  const mk2 = crypto.getRandomValues(new Uint8Array(32)), mir2 = JSON.parse(await I.sealMirror(mk2, [acc[0]]));
+  const pl2 = new TextDecoder().decode(await subtle.decrypt({ name: 'AES-GCM', iv: otp.b64ToBytes(mir2.iv), additionalData: te.encode('HallowAuthMirror1') }, await subtle.importKey('raw', mk2, 'AES-GCM', false, ['decrypt']), otp.b64ToBytes(mir2.ct)));
+  check('per-account notes never go into the PC mirror', !pl2.includes('1111-2222') && pl2.includes('JBSWY3DPEHPK3PXP'));
+  // ---- the offline list covers every app file
+  const sw = fs.readFileSync(new URL('../app/sw.js', import.meta.url), 'utf8'), appFiles = fs.readdirSync(new URL('../app/', import.meta.url)).filter(f => !/\.md$/.test(f) && f !== 'sw.js');
+  check('service worker caches every app file (offline): ' + appFiles.length, appFiles.every(f => sw.includes("'" + f + "'")), appFiles.filter(f => !sw.includes("'" + f + "'")));
+  check('service worker version 1.1.0 (new cache, the old one dropped)', /VERSION = '1\.1\.0'/.test(sw));
+}
 console.log(fails ? fails + ' FAILED (' + passes + ' passed)' : 'ALL PASSED (' + passes + ')');
 process.exit(fails ? 1 : 0);
