@@ -345,7 +345,11 @@ check('2FAS plain: 2 entries incl. Steam', tp.entries.length === 2 && tp.entries
   // ---- the offline list covers every app file
   const sw = fs.readFileSync(new URL('../app/sw.js', import.meta.url), 'utf8'), appFiles = fs.readdirSync(new URL('../app/', import.meta.url)).filter(f => !/\.md$/.test(f) && f !== 'sw.js');
   check('service worker caches every app file (offline): ' + appFiles.length, appFiles.every(f => sw.includes("'" + f + "'")), appFiles.filter(f => !sw.includes("'" + f + "'")));
-  check('service worker version 1.1.0 (new cache, the old one dropped)', /VERSION = '1\.1\.0'/.test(sw));
+  // not pinned to one release: the service worker's cache version is the package version (so every release drops the old cache),
+  // and the app's VERSION is the same release (1.1 <-> 1.1.0)
+  const pkgV = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version, swV = (/VERSION = '([^']+)'/.exec(sw) || [])[1];
+  const appV = (/export const VERSION = '([^']+)'/.exec(fs.readFileSync(new URL('../app/app.js', import.meta.url), 'utf8')) || [])[1], norm = v => String(v).replace(/(\.0)+$/, '');
+  check('service worker version ' + swV + ' = package ' + pkgV + ' = app ' + appV + ' (new cache each release, the old one dropped)', swV === pkgV && norm(appV) === norm(pkgV));
 }
 console.log(fails ? fails + ' FAILED (' + passes + ' passed)' : 'ALL PASSED (' + passes + ')');
 process.exit(fails ? 1 : 0);
